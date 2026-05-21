@@ -1,0 +1,40 @@
+# FTTR断电重启自动化测试配置
+# 修改这里的参数即可调整测试行为
+
+relay:
+  # USB转串口端口号（在设备管理器中查看，如 COM3）
+  port: "COM3"
+  baudrate: 9600
+  # 继电器指令（2通道）
+  power_on_cmd: "A00201A3"    # 打开继电器（上电）
+  power_off_cmd: "A00200A2"   # 关闭继电器（断电）
+
+fttr:
+  # 主设备（用于ping验证）
+  master_ip: "192.168.1.1"
+  # 从设备（用于telnet检查）
+  slave_ip: "192.168.1.2"
+  # telnet登录凭据（实际值请填写本地config.local.yaml）
+  telnet_user: "${TELNET_USER}"
+  telnet_password: "${TELNET_PASSWORD}"
+  # su root凭据（实际值请填写本地config.local.yaml）
+  root_password: "${ROOT_PASSWORD}"
+  # 检查文件路径
+  dump_file: "/tmp/dump.txt"
+
+test:
+  # 断电保持时间（秒）
+  power_off_duration: 10
+  # ping轮询间隔（秒）
+  ping_interval: 10
+  # ping最大等待时间（秒）
+  ping_timeout: 180
+  # 循环测试次数
+  loop_count: 5
+  # dump.txt中异常关键词（出现则判定为异常）
+  error_keywords:
+    - "panic"
+    - "error"
+    - "exception"
+    - "fault"
+    - "fail"
