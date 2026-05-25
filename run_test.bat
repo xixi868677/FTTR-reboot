@@ -1,48 +1,50 @@
 @echo off
-REM FTTR断电重启自动化测试启动脚本
-REM 用法: run_test.bat 或双击运行
+chcp 65001 >nul 2>&1
+
+REM FTTR Power Reboot Auto Test - Run Script
+REM Usage: run_test.bat or double-click to run
 
 echo ========================================
-echo   FTTR断电重启自动化测试
+echo   FTTR Power Reboot Auto Test
 echo ========================================
 echo.
 
-REM 检查python
+REM Check python
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo [错误] 未找到Python，请先安装Python 3.10+
+    echo [ERROR] Python not found, please install Python 3.10+
     pause
     exit /b 1
 )
 
-REM 检查robotframework
+REM Check robotframework
 python -c "import robot" >nul 2>&1
 if errorlevel 1 (
-    echo [错误] 未安装robotframework，正在安装...
+    echo [INFO] Installing dependencies...
     pip install robotframework pyserial paramiko pyyaml
 )
 
-echo [信息] 开始执行测试...
+echo [INFO] Running test...
 echo.
 
-REM 判断使用哪个配置文件
+REM Pick config file
 set CONFIG_FILE=config.local.yaml
 if not exist config.local.yaml set CONFIG_FILE=config.yaml
-echo [信息] 使用配置文件: %CONFIG_FILE%
+echo [INFO] Config file: %CONFIG_FILE%
 
-REM 执行Robot Framework测试
+REM Run Robot Framework test
 python -m robot --outputdir results --timestampoutputs ^
     --pythonpath . ^
     --variablefile %CONFIG_FILE% ^
-    --logtitle "FTTR断电重启测试日志" ^
-    --reporttitle "FTTR断电重启测试报告" ^
+    --logtitle "FTTR Power Reboot Test Log" ^
+    --reporttitle "FTTR Power Reboot Test Report" ^
     tests/fttr_power_reboot_test.robot
 
 echo.
 echo ========================================
-echo   测试完成！结果在 results/ 目录下
-echo   - output.xml  (Jenkins Robot插件解析)
-echo   - log.html    (详细日志)
-echo   - report.html (测试报告)
+echo   Test Done! Results in results/ folder
+echo   - output.xml  (for Jenkins Robot plugin)
+echo   - log.html    (detail log)
+echo   - report.html (test report)
 echo ========================================
 pause

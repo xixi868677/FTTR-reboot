@@ -32,94 +32,93 @@ class ZentaoSync:
             "account": self.user,
             "password": self.password,
         })
-        if resp.status_code == 200:
+        if resp.status_code in (200, 201):
             data = resp.json()
             self.token = data.get("token")
-            self.session.headers.update({"Token": self.token})
-            print(f"[禅道] 登录成功, token: {self.token[:20]}...")
+            if self.token:
+                self.session.headers.update({"Token": self.token})
+                print(f"[Zentao] Login OK, token: {self.token[:20]}...")
+            else:
+                raise RuntimeError(f"Zentao login returned no token: {resp.text}")
         else:
-            raise RuntimeError(f"禅道登录失败: {resp.status_code} {resp.text}")
+            raise RuntimeError(f"Zentao login failed: {resp.status_code} {resp.text}")
 
-    def update_test_result(self, case_id, result, steps_info=""):
+    def get_case_steps(self, case_id):
+        """获取禅道用例的步骤列表"""
+        url = f"{self.base_url}/api.php/v1/testcases/{case_id}"
+        resp = self.session.get(url)
+        if resp.status_code != 200:
+            return []
+        case = resp.json()
+        return case.get("steps", [])
+
+    def update_test_result(self, case_id, result, step_results=None):
         """更新测试用例执行结果
 
         Args:
             case_id: 禅道用例ID
             result: 'pass' 或 'fail'
-            steps_info: 步骤信息字符串
+            step_results: dict {step_id: '实际结果文本'} 或 None
         """
-        # 尝试禅道开源版API（v1）
-        url = f"{self.base_url}/api.php/v1/cases/{case_id}"
+        # 获取用例步骤
+        steps = self.get_case_steps(case_id)
+        if not steps:
+            print(f"[Zentao] 用例 {case_id} 无步骤信息，尝试直接提交...")
+            return self._submit_simple(case_id, result)
 
-        # 先尝试获取用例信息
-        resp = self.session.get(url)
-        if resp.status_code != 200:
-            print(f"[禅道] 获取用例 {case_id} 失败: {resp.status_code} {resp.text[:200]}")
-            # 尝试旧版API
-            return self._update_test_result_legacy(case_id, result, steps_info)
+        # 构建步骤结果数组
+        steps_payload = []
+        for step in steps:
+            step_id = step["id"]
+            step_name = step.get("name", "")
+            if step_results and str(step_id) in step_results:
+                real = step_results[str(step_id)]
+            else:
+                real = result.upper()
+            steps_payload.append({
+                "id": step_id,
+                "result": result,
+                "real": real,
+            })
 
-        # 提交测试结果
-        # 禅道的测试结果提交方式因版本而异
-        # 这里尝试通过 bug 或 testTask 方式提交
+        # 提交到 /api.php/v1/testcases/{id}/results
+        url = f"{self.base_url}/api.php/v1/testcases/{case_id}/results"
         payload = {
             "result": result,
-            "steps": steps_info,
+            "steps": steps_payload,
         }
-        resp = self.session.post(f"{url}/results", json=payload)
-        if resp.status_code in (200, 201):
-            print(f"[禅道] 用例 {case_id} 结果已同步: {result}")
-            return True
-        else:
-            print(f"[禅道] API v1提交失败，尝试legacy方式...")
-            return self._update_test_result_legacy(case_id, result, steps_info)
 
-    def _update_test_result_legacy(self, case_id, result, steps_info=""):
-        """禅道旧版API方式提交结果
-
-        通过创建测试执行结果来同步
-        """
-        # 先登录获取session
-        login_url = f"{self.base_url}/index.php?m=user&f=login"
-        self.session.get(login_url)
-        resp = self.session.post(login_url, data={
-            "account": self.user,
-            "password": self.password,
-            "keepLogin": "on",
-        })
-
-        # 提交测试结果
-        # 禅道旧版通过 testtask -> results 提交
-        result_map = {"pass": "pass", "fail": "fail", "blocked": "blocked"}
-        zentao_result = result_map.get(result, "fail")
-
-        # 尝试直接通过API提交
-        url = f"{self.base_url}/api.php/v1/results"
-        payload = {
-            "case": case_id,
-            "result": zentao_result,
-            "steps": steps_info,
-        }
         resp = self.session.post(url, json=payload)
         if resp.status_code in (200, 201):
-            print(f"[禅道] 用例 {case_id} 结果已同步(legacy): {result}")
+            print(f"[Zentao] 用例 {case_id} 结果已同步: {result}")
             return True
         else:
-            print(f"[禅道] legacy提交也失败: {resp.status_code} {resp.text[:300]}")
-            print(f"[禅道] 请检查禅道版本和API权限，或手动同步结果")
+            print(f"[Zentao] 提交失败: {resp.status_code} {resp.text[:300]}")
             return False
+
+    def _submit_simple(self, case_id, result):
+        """无步骤时简单提交"""
+        url = f"{self.base_url}/api.php/v1/testcases/{case_id}/results"
+        payload = {"result": result}
+        resp = self.session.post(url, json=payload)
+        if resp.status_code in (200, 201):
+            print(f"[Zentao] 用例 {case_id} 结果已同步(simple): {result}")
+            return True
+        print(f"[Zentao] simple提交失败: {resp.status_code} {resp.text[:300]}")
+        return False
 
 
 def parse_robot_output(xml_path):
     """解析Robot Framework output.xml
 
     Returns:
-        list of dict: [{'name': ..., 'status': 'PASS'|'FAIL', 'message': ..., 'elapsed': ...}]
+        list of dict: [{'name': ..., 'status': 'PASS'|'FAIL', 'message': ..., 'elapsed': ...,
+                        'log_messages': [...]}]
     """
     tree = ET.parse(xml_path)
     root = tree.getroot()
     results = []
 
-    # 找到所有test元素
     for test in root.iter("test"):
         name = test.get("name", "unknown")
         status_elem = test.find("status")
@@ -127,11 +126,14 @@ def parse_robot_output(xml_path):
         message = status_elem.text.strip() if status_elem is not None and status_elem.text else ""
         elapsed = status_elem.get("elapsed", "0") if status_elem is not None else "0"
 
+        log_messages = _collect_keyword_logs(test)
+
         results.append({
             "name": name,
             "status": status,
             "message": message,
             "elapsed": elapsed,
+            "log_messages": log_messages,
         })
 
     if not results:
@@ -140,14 +142,61 @@ def parse_robot_output(xml_path):
     return results
 
 
+def _collect_keyword_logs(element):
+    """递归收集keyword中的log消息"""
+    messages = []
+    for kw in element.findall("kw"):
+        child_msgs = _collect_keyword_logs(kw)
+        messages.extend(child_msgs)
+
+        for msg in kw.findall("msg"):
+            level = msg.get("level", "INFO")
+            text = msg.text.strip() if msg.text else ""
+            if text and level in ("INFO", "WARN", "FAIL"):
+                messages.append(text)
+
+    return messages
+
+
+def build_step_results(test_results):
+    """从Robot Framework日志中构建禅道步骤结果映射
+
+    匹配规则：查找 [步骤N] 标记的日志，映射到禅道步骤
+    """
+    step_map = {}
+    for r in test_results:
+        for msg in r.get("log_messages", []):
+            # 匹配 [步骤1], [步骤2], ... [步骤9]
+            if "[步骤" in msg and "] " in msg:
+                # 提取步骤号
+                start = msg.index("[步骤") + 4
+                end = msg.index("]", start)
+                step_num = msg[start:end].split(".")[0]  # 处理 1.1, 1.2 等
+                # 提取 -> PASS 或 -> FAIL
+                if " -> PASS" in msg:
+                    step_map[step_num] = msg.replace(" -> PASS", "").strip()
+                elif " -> FAIL" in msg:
+                    step_map[step_num] = msg.replace(" -> FAIL", " (失败)").strip()
+                else:
+                    step_map[step_num] = msg.strip()
+    return step_map
+
+
 def build_steps_info(test_results):
     """将测试结果格式化为步骤信息字符串"""
     lines = []
-    for i, r in enumerate(test_results, 1):
-        lines.append(f"测试{i}: {r['name']} - {r['status']}")
+    for r in test_results:
+        lines.append(f"测试用例: {r['name']} - {r['status']}")
         if r["message"]:
-            lines.append(f"  信息: {r['message']}")
+            lines.append(f"  失败原因: {r['message']}")
         lines.append(f"  耗时: {r.get('elapsed', 'N/A')}秒")
+        lines.append("  --- 详细步骤 ---")
+
+        for msg in r.get("log_messages", []):
+            if "[步骤" in msg or "轮测试" in msg or "PASS" in msg or "FAIL" in msg:
+                lines.append(f"  {msg}")
+
+        lines.append("  --- 步骤结束 ---")
     return "\n".join(lines)
 
 
@@ -177,13 +226,16 @@ def main():
     print(steps_info)
     print()
 
+    # 构建步骤结果
+    step_results = build_step_results(test_results)
+
     # 同步禅道
     case_ids = [cid.strip() for cid in args.case_id.split(",")]
     sync = ZentaoSync(args.url, args.user, args.pwd)
     sync.login()
 
     for case_id in case_ids:
-        success = sync.update_test_result(case_id, overall, steps_info)
+        success = sync.update_test_result(case_id, overall, step_results)
         if not success:
             print(f"[警告] 用例 {case_id} 同步失败，请手动更新")
 

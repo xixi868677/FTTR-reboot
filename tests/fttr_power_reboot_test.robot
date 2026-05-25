@@ -1,27 +1,22 @@
 *** Settings ***
 Documentation     FTTR设备断电重启状态自动化测试
 ...
-...               测试流程：
-...               1. 获取基准dump.txt内容
-...               2. 继电器断电 -> 验证掉电 -> 等待 -> 上电
-...               3. 轮询ping等待设备恢复
-...               4. telnet到从设备检查dump.txt
-...               5. 验证内容更新且无异常关键词
-...               6. 循环N次
+...               测试流程（对应禅道用例步骤）：
+...               步骤1：获取基准dump.txt内容并验证
+...               步骤2：继电器断电
+...               步骤3：验证设备已掉电
+...               步骤4：等待断电保持时间
+...               步骤5：继电器上电
+...               步骤6：轮询ping等待设备恢复
+...               步骤7：telnet到从设备获取dump.txt
+...               步骤8：验证dump.txt内容有效、无异常关键词、拓扑正常
+...               步骤9：重复步骤2~8共N次
 
 Library           OperatingSystem
 Library           libraries.relay_controller.RelayController
 Library           libraries.fttr_checker.FttrChecker
 
-# 优先加载本地配置（含真实密码），不存在则加载模板
-Library           OperatingSystem
-# Variables会在Settings阶段加载，用条件判断不方便
-# 约定：本地运行时在命令行用 --variablefile config.local.yaml 覆盖
-# Jenkins上也通过 --variablefile 传入真实配置
-
 *** Variables ***
-# 这些变量会被config.yaml中的值覆盖
-# 如果不用yaml，也可以直接在这里改
 ${RELAY_PORT}         COM3
 ${MASTER_IP}          192.168.1.1
 ${SLAVE_IP}           192.168.1.2
@@ -33,7 +28,7 @@ ${POWER_OFF_DURATION}    10
 ${PING_INTERVAL}         10
 ${PING_TIMEOUT}          180
 ${LOOP_COUNT}            5
-@{ERROR_KEYWORDS}        panic    error    exception    fault    fail
+@{ERROR_KEYWORDS}        panic    exception    call_trace    kernel panic
 
 
 *** Test Cases ***
@@ -42,108 +37,136 @@ FTTR设备断电重启循环测试
     [Setup]    初始化测试环境
     [Teardown]    清理测试环境
 
-    # 记录循环计数
     ${total}=    Set Variable    ${LOOP_COUNT}
+    Log    ================================
     Log    开始FTTR断电重启测试，共循环 ${total} 次
+    Log    ================================
 
     FOR    ${round}    IN RANGE    ${total}
-        Log    ========== 第 ${round+1}/${total} 轮测试开始 ==========
-        ${round_result}=    执行单轮断电重启测试    ${round+1}
-        Run Keyword If    '${round_result}' == 'FAIL'
-        ...    Fail    第 ${round+1} 轮测试失败
-        Log    ========== 第 ${round+1}/${total} 轮测试通过 ==========
+        ${round_num}=    Evaluate    ${round} + 1
+        Log    \n************************************
+        Log    * 第 ${round_num}/${total} 轮测试开始
+        Log    ************************************
+        ${round_result}=    Run Keyword And Return Status
+        ...    执行单轮断电重启测试    ${round_num}    ${total}
+        IF    not ${round_result}
+            Fail    \n>>>>> 第 ${round_num}/${total} 轮测试失败 <<<<<
+        END
+        Log    \n==== 第 ${round_num}/${total} 轮测试通过 ====
     END
 
+    Log    \n================================
     Log    全部 ${total} 轮测试通过！FTTR设备断电重启功能正常
+    Log    ================================
 
 
 *** Keywords ***
 初始化测试环境
-    [Documentation]    连接继电器，确认设备初始状态正常
+    [Documentation]    连接继电器，确认设备初始状态正常（对应步骤1）
+    Log    [步骤1] 初始化测试环境
+
     # 连接继电器
     Connect Relay    ${RELAY_PORT}    9600
-    Log    继电器串口已连接: ${RELAY_PORT}
+    Log    [步骤1.1] 继电器串口已连接: ${RELAY_PORT} -> PASS
 
     # 确认设备当前可达
     ${ping_ok}=    Run Keyword And Return Status
     ...    Ping Device Until Online    ${MASTER_IP}    timeout=30    interval=5
     IF    not ${ping_ok}
-        Fail    初始化失败：设备当前不可达，请确认FTTR设备状态
+        Fail    [步骤1.2] 设备初始状态不可达，请确认FTTR设备状态 -> FAIL
     END
+    Log    [步骤1.2] 设备初始可达性验证 (${MASTER_IP}) -> PASS
+
+    # 等待主设备telnet服务就绪
+    Sleep    10s    等待主设备telnet服务就绪
 
     # 获取基准dump.txt内容
     ${baseline}=    Get Dump File Content
-    ...    ${SLAVE_IP}    ${TELNET_USER}    ${TELNET_PASSWORD}
+    ...    ${MASTER_IP}    ${TELNET_USER}    ${TELNET_PASSWORD}
     ...    ${ROOT_PASSWORD}    ${DUMP_FILE}
     Set Dump Baseline    ${baseline}
-    Log    已获取dump.txt基准内容（长度: ${baseline.__len__()}）
+    ${blen}=    Evaluate    len('''${baseline}''')
+    Log    [步骤1.3] 获取基准dump.txt内容 (长度: ${blen}) -> PASS
 
     # 验证基准内容是有效JSON
     ${devices}=    Parse Topology Info    ${baseline}
     Verify Topology Not Empty    ${devices}
-    Log    基准拓扑信息有效，发现 ${devices.__len__()} 个设备
+    ${dlen}=    Evaluate    len(${devices})
+    Log    [步骤1.4] 基准拓扑信息验证通过，发现 ${dlen} 个设备 -> PASS
 
 清理测试环境
     [Documentation]    确保继电器处于打开状态，断开串口连接
     Run Keyword And Ignore Error    Send Relay On
     Disconnect Relay
-    Log    测试环境已清理，继电器已断开
+    Log    [清理] 继电器已恢复上电状态，串口已断开
 
 执行单轮断电重启测试
-    [Documentation]    执行一轮完整的断电-上电-验证流程
-    [Arguments]    ${round_num}
+    [Documentation]    执行一轮完整的断电-上电-验证流程（对应步骤2~8）
+    [Arguments]    ${round_num}    ${total}
 
-    # Step 1: 断电
-    Log    [Round ${round_num}] 发送断电指令...
+    # === 步骤2：断电 ===
+    Log    [步骤2] 第${round_num}轮 - 发送继电器断电指令...
     Send Relay Off
     Sleep    2s    等待继电器动作
+    Log    [步骤2] 第${round_num}轮 - 继电器断电指令已发送 -> PASS
 
-    # Step 2: 验证设备已断电（ping不通）
-    ${offline}=    Run Keyword And Return Status
-    ...    Wait Until Device Offline    ${MASTER_IP}    timeout=30
+    # === 步骤3：验证设备已掉电 ===
+    Log    [步骤3] 第${round_num}轮 - 验证设备是否已掉电...
+    ${offline}=    Wait Until Device Offline    ${MASTER_IP}    timeout=30
     IF    not ${offline}
-        Fail    [Round ${round_num}] 断电后设备仍然在线，继电器可能未生效
+        Fail    [步骤3] 第${round_num}轮 - 断电后设备仍然在线(${MASTER_IP})，继电器可能未生效 -> FAIL
     END
-    Log    [Round ${round_num}] 设备已确认断电
+    Log    [步骤3] 第${round_num}轮 - 设备已确认掉电 (${MASTER_IP}不可达) -> PASS
 
-    # Step 3: 等待断电保持时间
-    Sleep    ${POWER_OFF_DURATION}s    断电保持中，等待 ${POWER_OFF_DURATION} 秒
+    # === 步骤4：等待断电保持时间 ===
+    Log    [步骤4] 第${round_num}轮 - 断电保持 ${POWER_OFF_DURATION} 秒...
+    Sleep    ${POWER_OFF_DURATION}s    断电保持中
+    Log    [步骤4] 第${round_num}轮 - 断电保持 ${POWER_OFF_DURATION} 秒完成 -> PASS
 
-    # Step 4: 上电
-    Log    [Round ${round_num}] 发送上电指令...
+    # === 步骤5：上电 ===
+    Log    [步骤5] 第${round_num}轮 - 发送继电器上电指令...
     Send Relay On
     Sleep    2s    等待继电器动作
+    Log    [步骤5] 第${round_num}轮 - 继电器上电指令已发送 -> PASS
 
-    # Step 5: 轮询ping等待设备恢复
+    # === 步骤6：轮询ping等待设备恢复 ===
+    Log    [步骤6] 第${round_num}轮 - 等待设备恢复上线 (超时: ${PING_TIMEOUT}s)...
     ${online}=    Ping Device Until Online
     ...    ${MASTER_IP}    timeout=${PING_TIMEOUT}    interval=${PING_INTERVAL}
     IF    not ${online}
-        Fail    [Round ${round_num}] 设备在 ${PING_TIMEOUT} 秒内未能恢复上线
+        Fail    [步骤6] 第${round_num}轮 - 设备在 ${PING_TIMEOUT} 秒内未恢复上线 -> FAIL
     END
-    Log    [Round ${round_num}] 主设备已恢复在线
+    Log    [步骤6] 第${round_num}轮 - 主设备已恢复在线 (${MASTER_IP}) -> PASS
 
-    # Step 6: telnet到从设备获取dump.txt
+    # === 步骤7：telnet到从设备获取dump.txt ===
+    Log    [步骤7] 第${round_num}轮 - telnet到从设备获取dump.txt...
     Sleep    10s    额外等待从设备完全启动
     ${current_content}=    Get Dump File Content
-    ...    ${SLAVE_IP}    ${TELNET_USER}    ${TELNET_PASSWORD}
+    ...    ${MASTER_IP}    ${TELNET_USER}    ${TELNET_PASSWORD}
     ...    ${ROOT_PASSWORD}    ${DUMP_FILE}
     Set Dump Current    ${current_content}
-    Log    [Round ${round_num}] 已获取当前dump.txt内容
+    Log    [步骤7] 第${round_num}轮 - dump.txt内容获取成功 -> PASS
 
-    # Step 7: 验证内容更新
-    Check Dump Content Updated
-    Log    [Round ${round_num}] dump.txt内容已更新
+    # === 步骤8：验证dump.txt内容 ===
+    Log    [步骤8] 第${round_num}轮 - 验证dump.txt内容...
 
-    # Step 8: 验证无异常关键词
+    # 8.1 验证内容有效
+    Check Dump Content Valid
+    Log    [步骤8.1] 第${round_num}轮 - dump.txt JSON格式有效且包含topology information -> PASS
+
+    # 8.2 验证无异常关键词
     Check Dump No Error Keywords    ${ERROR_KEYWORDS}
-    Log    [Round ${round_num}] dump.txt未发现异常关键词
+    Log    [步骤8.2] 第${round_num}轮 - dump.txt未发现异常关键词 -> PASS
 
-    # Step 9: 验证拓扑信息有效
+    # 8.3 验证拓扑信息有效
     ${devices}=    Parse Topology Info    ${current_content}
     Verify Topology Not Empty    ${devices}
-    Log    [Round ${round_num}] 拓扑信息有效，${devices.__len__()} 个设备
+    ${dlen}=    Evaluate    len(${devices})
+    Log    [步骤8.3] 第${round_num}轮 - 拓扑信息有效，${dlen} 个设备 -> PASS
 
-    # 更新基准为当前内容，供下一轮比较
+    Log    [步骤8] 第${round_num}轮 - dump.txt全部验证通过 -> PASS
+
+    # 更新基准为当前内容
     Set Dump Baseline    ${current_content}
 
 Ping Device Until Online

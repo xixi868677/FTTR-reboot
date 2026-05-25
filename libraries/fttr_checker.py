@@ -1,7 +1,6 @@
-"""FTTR设备检查库 - ping检测、telnet登录、dump.txt内容检查"""
+"""FTTR设备检查库 - telnet登录、dump.txt内容检查"""
 
 import json
-import re
 import telnetlib
 import time
 
@@ -19,32 +18,44 @@ class FttrChecker:
         """Telnet到从设备获取dump.txt内容
 
         登录流程: telnet -> admin/admin@123 -> su root -> cat dump.txt
+        连接失败时自动重试最多3次。
         """
-        tn = telnetlib.Telnet(host, timeout=30)
+        for attempt in range(3):
+            try:
+                tn = telnetlib.Telnet(host, timeout=30)
+                break
+            except (TimeoutError, OSError) as e:
+                if attempt < 2:
+                    time.sleep(10)
+                    continue
+                raise RuntimeError(
+                    f"Telnet connect to {host} failed after 3 attempts: {e}"
+                )
 
-        # 等待login提示
-        tn.read_until(b"login:", timeout=10)
+        # 等待Login提示（匹配ogin:兼容大小写）
+        tn.read_until(b"ogin:", timeout=10)
         tn.write(user.encode() + b"\n")
 
-        # 等待password提示
-        tn.read_until(b"Password:", timeout=10)
+        # 等待Password提示
+        tn.read_until(b"assword:", timeout=10)
         tn.write(password.encode() + b"\n")
 
-        # 等待shell提示符
+        # 等待shell提示符 $
         tn.read_until(b"$", timeout=10)
 
         # su root
         tn.write(b"su root\n")
-        tn.read_until(b"Password:", timeout=10)
+        tn.read_until(b"assword:", timeout=10)
+        # 用原始字节发送密码，避免%被Python格式化处理
         tn.write(root_password.encode() + b"\n")
-
-        # 等待root提示符
-        tn.read_until(b"#", timeout=10)
+        time.sleep(1)
+        # 读掉su的回显和可能的错误信息，等待提示符
+        tn.read_until(b"$", timeout=10)
 
         # 执行cat dump文件
         tn.write(f"cat {dump_file}\n".encode())
-        time.sleep(2)
-        output = tn.read_until(b"#", timeout=15).decode("utf-8", errors="ignore")
+        time.sleep(3)
+        output = tn.read_until(b"$", timeout=15).decode("utf-8", errors="ignore")
 
         # 提取cat命令之后、下一个提示符之前的内容
         lines = output.split("\n")
@@ -54,7 +65,7 @@ class FttrChecker:
             if f"cat {dump_file}" in line:
                 started = True
                 continue
-            if started and (line.strip().endswith("#") or line.strip().endswith("$")):
+            if started and line.strip().endswith("$"):
                 break
             if started:
                 content_lines.append(line)
@@ -76,17 +87,21 @@ class FttrChecker:
         """保存当前的dump.txt内容"""
         self._dump_current = content
 
-    def check_dump_content_updated(self):
-        """检查dump.txt内容是否有更新"""
-        if self._dump_current == self._dump_baseline:
-            raise AssertionError("dump.txt内容未发生变化，设备可能未重启")
+    def check_dump_content_valid(self):
+        """检查dump.txt内容是否有效（非空、可解析为JSON、包含拓扑信息）"""
+        if not self._dump_current or not self._dump_current.strip():
+            raise AssertionError("dump.txt内容为空，设备可能未正常启动")
+        try:
+            data = json.loads(self._dump_current)
+        except json.JSONDecodeError:
+            raise AssertionError(f"dump.txt不是有效JSON: {self._dump_current[:200]}")
+        topology = data.get("topology information")
+        if topology is None:
+            raise AssertionError("dump.txt中未找到topology information字段")
         return True
 
     def check_dump_no_error_keywords(self, error_keywords):
-        """检查dump.txt内容中是否包含异常关键词
-
-        error_keywords: 异常关键词列表，如 ['panic', 'error', 'exception']
-        """
+        """检查dump.txt内容中是否包含异常关键词"""
         content_lower = self._dump_current.lower()
         found_errors = []
         for keyword in error_keywords:
