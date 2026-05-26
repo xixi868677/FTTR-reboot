@@ -21,23 +21,23 @@ class FttrChecker:
         连接失败或文件不存在时自动重试，最多5次，每次间隔15秒。
         """
         last_error = ""
-        for attempt in range(5):
+        for attempt in range(10):
             try:
                 content = self._telnet_get_dump(host, user, password, root_password, dump_file)
                 if content and "No such file" not in content and "cannot open" not in content:
                     return content
                 last_error = content[:200] if content else "empty"
-                if attempt < 4:
-                    print(f"[Retry] dump.txt not ready, waiting 15s... (attempt {attempt+1}/5)")
+                if attempt < 9:
+                    print(f"[Retry] dump.txt not ready, waiting 15s... (attempt {attempt+1}/10)")
                     time.sleep(15)
             except (TimeoutError, OSError) as e:
                 last_error = str(e)
-                if attempt < 4:
-                    print(f"[Retry] telnet failed, waiting 15s... (attempt {attempt+1}/5)")
+                if attempt < 9:
+                    print(f"[Retry] telnet failed, waiting 15s... (attempt {attempt+1}/10)")
                     time.sleep(15)
                     continue
         raise RuntimeError(
-            f"Failed to get {dump_file} from {host} after 5 attempts. Last: {last_error}"
+            f"Failed to get {dump_file} from {host} after 10 attempts. Last: {last_error}"
         )
 
     def _telnet_get_dump(self, host, user, password, root_password, dump_file):
