@@ -15,22 +15,34 @@ class FttrChecker:
         self._dump_current = ""
 
     def get_dump_file_content(self, host, user, password, root_password, dump_file="/tmp/dump.txt"):
-        """Telnet到从设备获取dump.txt内容
+        """Telnet到设备获取dump.txt内容
 
         登录流程: telnet -> admin/admin@123 -> su root -> cat dump.txt
-        连接失败时自动重试最多3次。
+        连接失败或文件不存在时自动重试，最多5次，每次间隔15秒。
         """
-        for attempt in range(3):
+        last_error = ""
+        for attempt in range(5):
             try:
-                tn = telnetlib.Telnet(host, timeout=30)
-                break
+                content = self._telnet_get_dump(host, user, password, root_password, dump_file)
+                if content and "No such file" not in content and "cannot open" not in content:
+                    return content
+                last_error = content[:200] if content else "empty"
+                if attempt < 4:
+                    print(f"[Retry] dump.txt not ready, waiting 15s... (attempt {attempt+1}/5)")
+                    time.sleep(15)
             except (TimeoutError, OSError) as e:
-                if attempt < 2:
-                    time.sleep(10)
+                last_error = str(e)
+                if attempt < 4:
+                    print(f"[Retry] telnet failed, waiting 15s... (attempt {attempt+1}/5)")
+                    time.sleep(15)
                     continue
-                raise RuntimeError(
-                    f"Telnet connect to {host} failed after 3 attempts: {e}"
-                )
+        raise RuntimeError(
+            f"Failed to get {dump_file} from {host} after 5 attempts. Last: {last_error}"
+        )
+
+    def _telnet_get_dump(self, host, user, password, root_password, dump_file):
+        """单次telnet连接获取dump.txt内容"""
+        tn = telnetlib.Telnet(host, timeout=30)
 
         # 等待Login提示（匹配ogin:兼容大小写）
         tn.read_until(b"ogin:", timeout=10)
@@ -46,10 +58,8 @@ class FttrChecker:
         # su root
         tn.write(b"su root\n")
         tn.read_until(b"assword:", timeout=10)
-        # 用原始字节发送密码，避免%被Python格式化处理
         tn.write(root_password.encode() + b"\n")
         time.sleep(1)
-        # 读掉su的回显和可能的错误信息，等待提示符
         tn.read_until(b"$", timeout=10)
 
         # 执行cat dump文件
