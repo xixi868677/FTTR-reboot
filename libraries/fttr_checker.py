@@ -1,8 +1,12 @@
 """FTTR设备检查库 - telnet登录、dump.txt内容检查"""
 
+import base64
 import json
+import re
 import telnetlib
 import time
+
+import requests
 
 
 class FttrChecker:
@@ -13,6 +17,70 @@ class FttrChecker:
     def __init__(self):
         self._dump_baseline = ""
         self._dump_current = ""
+        self._http_session = requests.Session()
+        self._web_logged_in_host = ""
+
+    @staticmethod
+    def _encrypt_password(password):
+        """AES-128-CBC加密（与设备管理平台JS加密一致）"""
+        from Crypto.Cipher import AES
+        from Crypto.Util.Padding import pad
+        key = b"1111111111111111"
+        iv = b"0000000000000000"
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        padded = pad(password.encode("utf-8"), AES.block_size, style="pkcs7")
+        encrypted = cipher.encrypt(padded)
+        return base64.b64encode(encrypted).decode("utf-8")
+
+    def _web_login(self, host, web_user, web_pwd):
+        """登录设备Web管理平台"""
+        login_url = f"http://{host}/"
+        try:
+            page = self._http_session.get(login_url, timeout=10)
+            token_match = re.search(r'Frm_Logintoken.*?value="(\d+)"', page.text)
+            token = token_match.group(1) if token_match else "2"
+        except Exception:
+            token = "2"
+
+        logincode = self._encrypt_password(web_pwd)
+        payload = {
+            "action": "login",
+            "Frm_Logintoken": token,
+            "username": web_user,
+            "logincode": logincode,
+            "textpwd": "",
+            "ieversion": "1",
+        }
+        resp = self._http_session.post(login_url, data=payload, timeout=10, allow_redirects=True)
+        if resp.status_code == 200:
+            self._web_logged_in_host = host
+            print(f"[Dump] Web登录成功: {host}")
+        else:
+            print(f"[Dump] Web登录失败: {resp.status_code}")
+
+    def trigger_dump_generation(self, host, web_user="CMCCAdmin", web_pwd=""):
+        """登录管理平台并访问拓扑页面，触发dump.txt生成"""
+        if not web_pwd:
+            print("[Dump] 无web密码，跳过触发")
+            return
+        if self._web_logged_in_host != host:
+            try:
+                self._web_login(host, web_user, web_pwd)
+            except Exception as e:
+                print(f"[Dump] Web登录异常: {e}")
+                return
+        # 先加载外层页面，再加载iframe内容（iframe才是真正触发生成的）
+        base_url = f"http://{host}/getpage.gch?pid=1002&nextpage=app_easymesh_topo_t.gch"
+        iframe_url = f"http://{host}/template.gch?pid=1002&nextpage=app_easymesh_topo_t.gch"
+        try:
+            self._http_session.get(base_url, timeout=10)
+            resp = self._http_session.get(iframe_url, timeout=10)
+            if resp.status_code == 200:
+                print(f"[Dump] 已触发dump.txt生成")
+            else:
+                print(f"[Dump] iframe返回非200: {resp.status_code}")
+        except requests.RequestException as e:
+            print(f"[Dump] 触发请求失败: {e}")
 
     def get_dump_file_content(self, host, user, password, root_password, dump_file="/tmp/dump.txt"):
         """Telnet到设备获取dump.txt内容
@@ -23,6 +91,10 @@ class FttrChecker:
         last_error = ""
         for attempt in range(10):
             try:
+                # 先触发dump.txt生成
+                self.trigger_dump_generation(host, web_pwd=root_password)
+                time.sleep(3)
+
                 content = self._telnet_get_dump(host, user, password, root_password, dump_file)
                 if content and "No such file" not in content and "cannot open" not in content:
                     return content

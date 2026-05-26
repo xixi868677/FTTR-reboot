@@ -80,3 +80,5 @@ echo   Done!
 echo   Result: %OUTPUT_XML%
 if not "%CASE_ID%"=="" echo   Zentao Case: %CASE_ID%
 echo ========================================
+
+exit /b %TEST_RC%

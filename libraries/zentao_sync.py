@@ -52,33 +52,20 @@ class ZentaoSync:
         case = resp.json()
         return case.get("steps", [])
 
-    def update_test_result(self, case_id, result, step_results=None, fail_msg=""):
+    def update_test_result(self, case_id, result, step_results=None, fail_step=0, fail_msg=""):
         """更新测试用例执行结果
 
         Args:
             case_id: 禅道用例ID
             result: 'pass' 或 'fail'（整体结果）
             step_results: dict {步骤号: {"result": "pass"/"fail", "real": "描述"}}
+            fail_step: 失败发生在第几步（0=没有失败）
             fail_msg: 失败原因
         """
         steps = self.get_case_steps(case_id)
         if not steps:
             print(f"[Zentao] 用例 {case_id} 无步骤信息，尝试直接提交...")
             return self._submit_simple(case_id, result)
-
-        # 找到最后一个有结果的步骤号
-        last_executed = 0
-        if step_results:
-            for k in step_results:
-                try:
-                    num = int(k)
-                    if num > last_executed:
-                        last_executed = num
-                except ValueError:
-                    pass
-
-        # 如果测试失败，最后执行的步骤就是出问题的步骤
-        fail_step = last_executed if result == "fail" else 0
 
         steps_payload = []
         for step in steps:
@@ -90,21 +77,23 @@ class ZentaoSync:
             except ValueError:
                 pass
 
+            # 根据步骤位置和失败步骤确定结果
             if step_results and step_name in step_results:
                 info = step_results[step_name]
-                step_result = info["result"]
-                step_real = info["real"]
-
-                # 如果这个步骤有PASS日志但它是失败的步骤，标记为fail
-                if step_num == fail_step and step_result == "pass":
+                if step_num == fail_step:
                     step_result = "fail"
                     step_real = fail_msg if fail_msg else "执行失败"
-
-            elif step_num == fail_step and step_num > last_executed:
-                # 失败的步骤（没有日志，推断出来的）
+                elif step_num > fail_step and result == "fail" and fail_step > 0:
+                    step_result = "blocked"
+                    step_real = "未执行（前序步骤失败）"
+                else:
+                    step_result = info["result"]
+                    step_real = info["real"]
+            elif step_num == fail_step:
+                # 失败步骤（没有日志）
                 step_result = "fail"
-                step_real = "执行失败"
-            elif step_num > fail_step and result == "fail":
+                step_real = fail_msg if fail_msg else "执行失败"
+            elif step_num > fail_step and result == "fail" and fail_step > 0:
                 # 失败步骤之后的步骤
                 step_result = "blocked"
                 step_real = "未执行（前序步骤失败）"
@@ -183,17 +172,32 @@ def parse_robot_output(xml_path):
 
 
 def _collect_keyword_logs(element):
-    """递归收集keyword中的log消息"""
+    """递归收集keyword中的log消息（包括FOR循环内的）"""
     messages = []
-    for kw in element.findall("kw"):
-        child_msgs = _collect_keyword_logs(kw)
-        messages.extend(child_msgs)
 
+    # 处理普通keyword
+    for kw in element.findall("kw"):
+        messages.extend(_collect_keyword_logs(kw))
         for msg in kw.findall("msg"):
             level = msg.get("level", "INFO")
             text = msg.text.strip() if msg.text else ""
             if text and level in ("INFO", "WARN", "FAIL"):
                 messages.append(text)
+
+    # 处理FOR循环
+    for for_elem in element.findall("for"):
+        for iter_elem in for_elem.findall("iter"):
+            messages.extend(_collect_keyword_logs(iter_elem))
+            for msg in iter_elem.findall("msg"):
+                level = msg.get("level", "INFO")
+                text = msg.text.strip() if msg.text else ""
+                if text and level in ("INFO", "WARN", "FAIL"):
+                    messages.append(text)
+
+    # 处理IF条件
+    for if_elem in element.findall("if"):
+        for branch in if_elem.findall("branch"):
+            messages.extend(_collect_keyword_logs(branch))
 
     return messages
 
@@ -201,31 +205,70 @@ def _collect_keyword_logs(element):
 def build_step_results(test_results):
     """从Robot Framework日志中构建禅道步骤结果映射
 
-    返回 dict: {步骤号: {"result": "pass"/"fail", "real": "描述"}}
+    按日志顺序分析，找到失败发生在哪一步：
+    - 最后一个PASS的步骤之后，就是失败的步骤
+    - 之后所有步骤标记为blocked
+
+    返回 dict: {步骤号: {"result": "pass"/"fail"/"blocked", "real": "描述"}}
+    同时返回 fail_step (失败的步骤号) 和 fail_msg (失败原因)
     """
     step_map = {}
+    ordered_steps = []  # 按顺序记录步骤号
+    fail_msg = ""
+
     for r in test_results:
+        if r["status"] == "FAIL" and r["message"]:
+            fail_msg = r["message"][:500]
+
         for msg in r.get("log_messages", []):
             if "[步骤" in msg and "] " in msg:
-                start = msg.index("[步骤") + 4
+                start = msg.index("[步骤") + len("[步骤")
                 end = msg.index("]", start)
                 step_num = msg[start:end].split(".")[0]
+
                 if " -> PASS" in msg:
                     step_map[step_num] = {
                         "result": "pass",
-                        "real": msg.replace(" -> PASS", " ✅").strip(),
+                        "real": msg.replace(" -> PASS", "").strip(),
                     }
+                    if step_num not in ordered_steps or ordered_steps[-1] != step_num:
+                        ordered_steps.append(step_num)
                 elif " -> FAIL" in msg:
                     step_map[step_num] = {
                         "result": "fail",
-                        "real": msg.replace(" -> FAIL", " ❌").strip(),
+                        "real": msg.replace(" -> FAIL", "").strip(),
                     }
-                else:
-                    step_map[step_num] = {
-                        "result": "pass",
-                        "real": msg.strip(),
-                    }
-    return step_map
+                    if step_num not in ordered_steps or ordered_steps[-1] != step_num:
+                        ordered_steps.append(step_num)
+
+    # 确定失败步骤
+    fail_step = 0
+    overall_fail = any(r["status"] == "FAIL" for r in test_results)
+
+    if overall_fail:
+        # 找有没有明确的FAIL步骤
+        has_explicit_fail = any(v["result"] == "fail" for v in step_map.values())
+
+        if has_explicit_fail:
+            # 有明确FAIL的步骤
+            for s in ordered_steps:
+                if step_map[s]["result"] == "fail":
+                    fail_step = int(s)
+                    break
+        else:
+            # 没有明确FAIL，推断：最后一个PASS步骤的下一步就是失败步骤
+            last_pass = 0
+            for s in ordered_steps:
+                if step_map[s]["result"] == "pass":
+                    try:
+                        num = int(s)
+                        if num > last_pass:
+                            last_pass = num
+                    except ValueError:
+                        pass
+            fail_step = last_pass + 1
+
+    return step_map, fail_step, fail_msg
 
 
 def build_steps_info(test_results):
@@ -273,7 +316,7 @@ def main():
     print()
 
     # 构建步骤结果
-    step_results = build_step_results(test_results)
+    step_results, fail_step, fail_msg = build_step_results(test_results)
 
     # 同步禅道
     case_ids = [cid.strip() for cid in args.case_id.split(",")]
@@ -281,13 +324,7 @@ def main():
     sync.login()
 
     for case_id in case_ids:
-        # 提取失败消息
-        fail_msg = ""
-        for r in test_results:
-            if r["status"] == "FAIL" and r["message"]:
-                fail_msg = r["message"][:300]
-                break
-        success = sync.update_test_result(case_id, overall, step_results, fail_msg)
+        success = sync.update_test_result(case_id, overall, step_results, fail_step, fail_msg)
         if not success:
             print(f"[警告] 用例 {case_id} 同步失败，请手动更新")
 

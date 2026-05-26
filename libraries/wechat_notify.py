@@ -49,38 +49,27 @@ def parse_robot_output(xml_path):
 
 
 def build_markdown_message(tests):
-    """构建markdown格式的消息"""
+    """构建简短的markdown格式消息"""
     total = len(tests)
     passed = sum(1 for t in tests if t["status"] == "PASS")
     failed = total - passed
 
     if failed == 0:
-        icon = "#### FTTR断电重启测试 ✅ 通过\n\n"
+        lines = ["#### FTTR断电重启测试 ✅ 通过\n"]
+        lines.append(f"> 共{total}个用例全部通过")
     else:
-        icon = "#### FTTR断电重启测试 ❌ 失败\n\n"
-
-    lines = [icon]
-
-    # 摘要
-    lines.append(f"> 通过: **{passed}** | 失败: **{failed}** | 总计: **{total}**\n")
-
-    # 每个用例结果
-    for t in tests:
-        status_icon = "✅" if t["status"] == "PASS" else "❌"
-        elapsed_str = f"{t['elapsed']:.1f}s"
-        lines.append(f"\n**{status_icon} {t['name']}** ({elapsed_str})")
-
-        if t["status"] == "FAIL" and t["message"]:
-            lines.append(f"> 失败原因: {t['message'][:200]}")
-
-        # 步骤详情（只显示关键步骤）
-        step_lines = []
-        for s in t.get("steps", []):
-            if "PASS" in s or "FAIL" in s:
-                step_lines.append(s)
-        if step_lines:
-            for s in step_lines[:20]:
-                lines.append(f"  - {s}")
+        lines = ["#### FTTR断电重启测试 ❌ 失败\n"]
+        for t in tests:
+            if t["status"] != "FAIL":
+                continue
+            lines.append(f"**失败用例**: {t['name']}")
+            if t["message"]:
+                lines.append(f"> {t['message'][:200]}")
+            # 只显示失败的步骤
+            for s in t.get("steps", []):
+                if "FAIL" in s:
+                    lines.append(f"- {s}")
+                    break
 
     return "\n".join(lines)
 
